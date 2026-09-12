@@ -1,3 +1,5 @@
+<img width="1007" height="761" alt="image" src="https://github.com/user-attachments/assets/561185a5-e3a4-47c8-a690-07c42f6d422f" />
+
 # LightOS 2 Pro
 
 > A bare-metal x86 operating system built from scratch — no Linux, no POSIX, pure metal.
