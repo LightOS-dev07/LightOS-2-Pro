@@ -1,0 +1,152 @@
+#ifndef VFS_H
+#define VFS_H
+/*
+ * kernel/vfs.h — LightOS Virtual File System
+ * ============================================
+ * Tamamen RAM tabanlı, basit hiyerarşik dosya sistemi.
+ * Gerçek disk sürücüsü olmadığı için her şey bellekte tutuluyor.
+ * 
+ * Yapı:
+ *   VfsNode: Dosya veya klasör.
+ *   VfsDir:  İçinde en fazla MAX_CHILDREN node barındıran klasör.
+ *   VFS:     Tek örnek (singleton) kök sistemi.
+ */
+
+#include <stdint.h>
+
+/* Maksimum değerler */
+static const int VFS_NAME_LEN   = 32;
+static const int VFS_MAX_NODES  = 128;   /* toplam node sayısı */
+static const int VFS_MAX_DATA   = 4096;  /* tek dosya max içerik (byte) */
+static const int VFS_MAX_CHILDREN = 16;  /* bir klasördeki max dosya */
+
+/* Node türleri */
+enum VfsNodeType { VFS_FILE = 0, VFS_DIR = 1 };
+
+/* Temel dosya/klasör düğümü */
+struct VfsNode {
+    char        name[VFS_NAME_LEN];
+    VfsNodeType type;
+    uint32_t    size;           /* dosya için byte, klasör için 0 */
+    uint32_t    data_offset;    /* VFS::data_pool'da konum */
+    int         parent;         /* parent node indeksi, -1=kök */
+    int         children[VFS_MAX_CHILDREN];
+    int         child_count;
+    bool        used;
+
+    void Init(const char* n, VfsNodeType t, int par) {
+        int i=0; while(n[i]&&i<VFS_NAME_LEN-1){name[i]=n[i];i++;} name[i]=0;
+        type=t; size=0; data_offset=0; parent=par;
+        child_count=0; used=true;
+        for(int j=0;j<VFS_MAX_CHILDREN;j++) children[j]=-1;
+    }
+};
+
+/* ── Tek örnek VFS ── */
+struct VFS {
+    VfsNode  nodes[VFS_MAX_NODES];
+    int      node_count;
+    uint8_t  data_pool[VFS_MAX_NODES * VFS_MAX_DATA];
+    uint32_t data_used;
+
+    void Init() {
+        node_count = 0; data_used = 0;
+        for(int i=0;i<VFS_MAX_NODES;i++) nodes[i].used=false;
+        /* Kök dizini: indeks 0. İsim "#" — eski "C:" (MS-DOS/Windows
+         * disk harfi geleneği) LightOS'un kendi kimliğiyle uyuşmuyordu;
+         * artık kök "#" olarak görünüyor, yollar "#/System/..." şeklinde. */
+        nodes[0].Init("#", VFS_DIR, -1);
+        node_count = 1;
+        /* Varsayılan dizin ağacını oluştur */
+        int sys  = MkDir(0, "System");
+        int usr  = MkDir(0, "Users");
+        int apps = MkDir(0, "Apps");
+        int temp = MkDir(0, "Temp");
+        int docs = MkDir(usr, "Default");
+        /* Birkaç başlangıç dosyası */
+        MkFile(sys,  "boot.cfg",    "# LightOS Boot Config\nresolution=800x600\ntheme=luna\n");
+        MkFile(sys,  "kernel.bin",  "[binary]");
+        MkFile(docs, "readme.txt",  "Welcome to LightOS 2 Pro!\nThis is your home directory.\n");
+        MkFile(docs, "notes.txt",   "");
+        MkFile(apps, "notepad.app", "[app]");
+        MkFile(apps, "calc.app",    "[app]");
+        MkFile(temp, "tmp0.tmp",    "");
+        (void)temp;
+    }
+
+    int AllocNode() {
+        for(int i=0;i<VFS_MAX_NODES;i++) if(!nodes[i].used) return i;
+        return -1;
+    }
+
+    int MkDir(int parent, const char* name) {
+        int idx = AllocNode(); if(idx<0) return -1;
+        nodes[idx].Init(name, VFS_DIR, parent);
+        if(parent>=0 && nodes[parent].child_count < VFS_MAX_CHILDREN)
+            nodes[parent].children[nodes[parent].child_count++] = idx;
+        if(idx >= node_count) node_count = idx+1;
+        return idx;
+    }
+
+    int MkFile(int parent, const char* name, const char* content) {
+        int idx = AllocNode(); if(idx<0) return -1;
+        nodes[idx].Init(name, VFS_FILE, parent);
+        /* İçeriği data_pool'a kopyala (+1: null-terminator için) */
+        nodes[idx].data_offset = data_used;
+        int len=0; while(content[len]) len++;
+        if(data_used + len + 1 < (int)sizeof(data_pool)) {
+            for(int i=0;i<len;i++) data_pool[data_used+i]=(uint8_t)content[i];
+            data_pool[data_used+len] = 0;
+            nodes[idx].size = len;
+            data_used += len + 1;
+        }
+        if(parent>=0 && nodes[parent].child_count < VFS_MAX_CHILDREN)
+            nodes[parent].children[nodes[parent].child_count++] = idx;
+        if(idx >= node_count) node_count = idx+1;
+        return idx;
+    }
+
+    /* Bir dizinin içeriğini yaz (notepad'den) */
+    bool WriteFile(int idx, const char* content) {
+        if(idx<0||!nodes[idx].used||nodes[idx].type!=VFS_FILE) return false;
+        int len=0; while(content[len]) len++;
+        if(len > VFS_MAX_DATA-1) len = VFS_MAX_DATA-1;
+        nodes[idx].data_offset = data_used; /* yeni blok */
+        if(data_used + len + 1 < (int)sizeof(data_pool)) {
+            for(int i=0;i<len;i++) data_pool[data_used+i]=(uint8_t)content[i];
+            data_pool[data_used+len] = 0; /* null-terminator: GetData() bir sonraki
+                                              dosyanın verisine taşmasın */
+            nodes[idx].size = len;
+            data_used += len + 1;
+        }
+        return true;
+    }
+    int CreateFile(int parent, const char* name) {
+    return MkFile(parent, name, "");
+}
+
+    /* İsme göre child bul */
+    int FindChild(int parent, const char* name) {
+        if(parent<0) return -1;
+        VfsNode& p = nodes[parent];
+        for(int i=0;i<p.child_count;i++){
+            int ci = p.children[i];
+            if(ci<0) continue;
+            /* strcmp */
+            const char* a=nodes[ci].name; const char* b=name;
+            int j=0; while(a[j]&&b[j]&&a[j]==b[j]) j++;
+            if(a[j]==b[j]) return ci;
+        }
+        return -1;
+    }
+
+    const char* GetData(int idx) {
+        if(idx<0||!nodes[idx].used) return "";
+        return (const char*)(data_pool + nodes[idx].data_offset);
+    }
+};
+
+/* Global VFS örneği — shell.cpp'de tanımlanır, extern ile erişilir */
+extern VFS g_vfs;
+
+#endif

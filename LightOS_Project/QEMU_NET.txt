@@ -1,0 +1,24 @@
+LightOS Network Support — QEMU & VirtualBox Configuration
+=========================================================
+
+Windows (PowerShell):
+  "C:\Program Files\qemu\qemu-system-x86_64.exe" -hda lightdisk.img `
+    -cdrom LightOS.iso -m 256M -vga std `
+    -device rtl8139,netdev=n0 `
+    -netdev user,id=n0
+
+Linux:
+  qemu-system-x86_64 -cdrom LightOS.iso -hda lightdisk.img -m 256M -vga std \
+    -device rtl8139,netdev=n0 \
+    -netdev user,id=n0
+
+VirtualBox:
+  Network → Adapter 1 → PCnet-PCI II (Am79C970A)
+  (RTL8139 is not supported in VBox; use PCnet instead)
+  NOTE: VirtualBox requires a separate PCnet driver.
+
+In-Browser Usage:
+  http://example.com        → Live Internet
+  http://93.184.216.34      → Direct IP connection
+  about:home                → Local homepage
+  file://Users/Default/x    → VFS file system

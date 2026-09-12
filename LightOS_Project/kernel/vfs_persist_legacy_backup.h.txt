@@ -1,0 +1,129 @@
+#ifndef VFS_PERSIST_H
+#define VFS_PERSIST_H
+/*
+ * kernel/vfs_persist.h — VFS Disk Kalıcılığı
+ * ============================================
+ * VFS durumunu ATA diski üzerine yazar ve okur.
+ * Sektör 0: sihirli sayı + meta
+ * Sektör 1+: node tablosu + veri havuzu
+ *
+ * Format (ham, sektör tabanlı):
+ *   [0x00] Magic: "LVFS" (4 byte)
+ *   [0x04] node_count (4 byte)
+ *   [0x08] Node dizisi (128 × sizeof(VfsNode))
+ *   [...] Data pool (128 × 4096 byte) -- büyük, sektörlere bölünür
+ *
+ * QEMU disk: -drive file=disk.img,format=raw
+ * disk.img oluştur: dd if=/dev/zero of=disk.img bs=1M count=64
+ *
+ * Not: Her node'un verisi diskte KENDİ sabit slotuna (node index'ine göre)
+ * yazılır — RAM'deki data_offset'e göre DEĞİL. RAM'de data_offset paylaşımlı/
+ * artan bir sayaçtır (VFS::data_used) ve node'lar arası çakışabilir; onu
+ * doğrudan disk offset'i olarak kullanmak hem farklı node'ların verisini
+ * karıştırabilir hem de data_pool sınırlarının dışına taşabilirdi.
+ * Sabit slot (n * VFS_MAX_DATA) kullanmak bu iki riski de ortadan kaldırır.
+ */
+#include "vfs.h"
+#include "../drivers/ata.h"
+
+#define VFS_MAGIC 0x5346564C  /* "LVFS" little-endian */
+
+/* VFS'i diske yaz */
+static bool vfs_save(){
+    if(!g_disk.present) return false;
+
+    /* Sektör 0: header */
+    uint8_t sec[512];
+    for(int i=0;i<512;i++) sec[i]=0;
+    *(uint32_t*)(sec+0) = VFS_MAGIC;
+    *(uint32_t*)(sec+4) = (uint32_t)g_vfs.node_count;
+    if(!g_disk.write_sector(0, sec)) return false;
+
+    /* Sektör 1+: node dizisi */
+    /* sizeof(VfsNode) hesapla: name[32]+type+parent+children+child_count+used+data[4096] */
+    /* Node başına yaklaşık 4160 byte → 9 sektör */
+    const int NODE_SECTS = 9;   /* 4608 byte → 9 × 512 */
+    for(int n=0;n<VFS_MAX_NODES;n++){
+        VfsNode& nd=g_vfs.nodes[n];
+        uint8_t nbuf[512+VFS_MAX_DATA];
+        for(int i=0;i<(int)(512+VFS_MAX_DATA);i++) nbuf[i]=0;
+        /* Serialize */
+        for(int i=0;i<32;i++) nbuf[i]=nd.name[i];
+        nbuf[32]=(uint8_t)nd.type;
+        nbuf[33]=(uint8_t)nd.used;
+        *(int32_t*)(nbuf+34)=nd.parent;
+        *(int32_t*)(nbuf+38)=nd.child_count;
+        for(int i=0;i<VFS_MAX_CHILDREN;i++) *(int32_t*)(nbuf+42+i*4)=nd.children[i];
+        *(uint32_t*)(nbuf+42+VFS_MAX_CHILDREN*4)   = nd.size;
+        *(uint32_t*)(nbuf+46+VFS_MAX_CHILDREN*4)   = nd.data_offset;
+        /* Data: RAM data_offset'ten değil, node'un kendi sabit slotundan oku.
+         * Sadece gerçek boyutu (nd.size) kadar kopyala, gerisi 0 kalsın. */
+        uint32_t doff = nd.data_offset;
+        uint32_t copy_len = nd.size;
+        if(copy_len > (uint32_t)VFS_MAX_DATA) copy_len = VFS_MAX_DATA;
+        if(doff + copy_len <= sizeof(g_vfs.data_pool)){
+            for(uint32_t i=0;i<copy_len;i++) nbuf[512+i]=g_vfs.data_pool[doff+i];
+        }
+        /* Write sectors */
+        uint32_t lba=1+(uint32_t)n*NODE_SECTS;
+        if(!g_disk.write(lba, NODE_SECTS, nbuf)) return false;
+    }
+    return true;
+}
+
+/* Diskten VFS yükle */
+static bool vfs_load(){
+    if(!g_disk.present) return false;
+
+    /* Header kontrol */
+    uint8_t sec[512];
+    if(!g_disk.read_sector(0, sec)) return false;
+    if(*(uint32_t*)(sec+0) != VFS_MAGIC) return false;
+
+    g_vfs.node_count=(int)*(uint32_t*)(sec+4);
+    if(g_vfs.node_count<0||g_vfs.node_count>VFS_MAX_NODES)
+        g_vfs.node_count=0;
+
+    /* RAM data_pool'u kullanılabilir tek bir sıralı alan olarak yeniden
+     * kur: her node'un verisini kendi diskteki slotundan okuyup data_pool
+     * içinde YENİ, çakışmayan bir offset'e (running_offset) yerleştiriyoruz.
+     * Böylece diskteki eski (n * VFS_MAX_DATA gibi seyrek) slot düzeni,
+     * RAM'deki WriteFile()'ın beklediği yoğun/artan data_used düzenine
+     * çevrilmiş olur. */
+    const int NODE_SECTS = 9;
+    uint32_t running_offset = 0;
+    for(int n=0;n<VFS_MAX_NODES;n++){
+        VfsNode& nd=g_vfs.nodes[n];
+        uint8_t nbuf[512+VFS_MAX_DATA];
+        for(int i=0;i<(int)(512+VFS_MAX_DATA);i++) nbuf[i]=0;
+        uint32_t lba=1+(uint32_t)n*NODE_SECTS;
+        if(!g_disk.read(lba, NODE_SECTS, nbuf)){
+            nd.used=false; continue;
+        }
+        for(int i=0;i<32;i++) nd.name[i]=(char)nbuf[i];
+        nd.name[31]=0;
+        nd.type=(VfsNodeType)nbuf[32];
+        nd.used=(bool)nbuf[33];
+        nd.parent=*(int32_t*)(nbuf+34);
+        nd.child_count=*(int32_t*)(nbuf+38);
+        for(int i=0;i<VFS_MAX_CHILDREN;i++) nd.children[i]=*(int32_t*)(nbuf+42+i*4);
+        uint32_t saved_size = *(uint32_t*)(nbuf+42+VFS_MAX_CHILDREN*4);
+        if(saved_size > (uint32_t)VFS_MAX_DATA) saved_size = VFS_MAX_DATA;
+
+        if(nd.used && nd.type==VFS_FILE &&
+           running_offset + saved_size + 1 <= sizeof(g_vfs.data_pool)){
+            nd.data_offset = running_offset;
+            nd.size        = saved_size;
+            for(uint32_t i=0;i<saved_size;i++)
+                g_vfs.data_pool[running_offset+i] = nbuf[512+i];
+            g_vfs.data_pool[running_offset+saved_size] = 0; /* null-terminator */
+            running_offset += saved_size + 1;
+        } else {
+            nd.data_offset = 0;
+            nd.size        = 0;
+        }
+    }
+    g_vfs.data_used = running_offset;
+    return true;
+}
+#endif

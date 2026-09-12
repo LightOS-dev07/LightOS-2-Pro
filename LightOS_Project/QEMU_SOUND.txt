@@ -1,0 +1,32 @@
+LightOS QEMU Ses — Dogru Komutlar
+===================================
+
+Windows Host (PowerShell / CMD):
+  "C:\Program Files\qemu\qemu-system-x86_64.exe" -hda lightdisk.img ^
+    -cdrom LightOS.iso -m 256M -vga std ^
+    -device AC97,audiodev=snd0 -audiodev dsound,id=snd0
+
+Linux Host:
+  qemu-system-x86_64 -cdrom LightOS.iso -hda lightdisk.img -m 256M -vga std \
+    -device AC97,audiodev=snd0 -audiodev pa,id=snd0
+
+macOS Host:
+  qemu-system-x86_64 -cdrom LightOS.iso -hda lightdisk.img -m 256M -vga std \
+    -device AC97,audiodev=snd0 -audiodev coreaudio,id=snd0
+
+VirtualBox (en kolay):
+  Audio Controller: ICH AC97
+  Host Audio Driver: Windows DirectSound
+
+NOT: -device AC97,audiodev=snd0 (virgülle baglanmali!)
+
+QEMU Windows Host (dogru komut):
+  "C:\Program Files\qemu\qemu-system-x86_64.exe" -cdrom LightOS.iso -hda lightdisk.img -m 256M -vga std -device AC97,audiodev=snd0 -audiodev dsound,id=snd0
+
+QEMU Linux Host:
+  qemu-system-x86_64 -cdrom LightOS.iso -hda lightdisk.img -m 256M -vga std -device AC97,audiodev=snd0 -audiodev pa,id=snd0
+
+QEMU macOS Host:
+  qemu-system-x86_64 -cdrom LightOS.iso -hda lightdisk.img -m 256M -vga std -device AC97,audiodev=snd0 -audiodev coreaudio,id=snd0
+
+NOT: -device AC97,audiodev=snd0  (virgülle, boşluksuz!)
